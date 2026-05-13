@@ -126,15 +126,35 @@ npm test           # tool-builder + dry-run tests — no After Effects needed
 | `ae_create_null_path` | Pin a layer to an invisible Null, keyframe a curved, drift-free path |
 | `ae_add_master_camera` | One master Null over everything + slight tilt expression — the cinematic stitch |
 
-**Output & escape hatch**
+**Effects, masks, mattes, camera**
 
 | Tool | What it does |
 | --- | --- |
-| `ae_render_frame` | Render one frame to a PNG and return the path — so the agent can *see* its work |
+| `ae_add_effect` / `ae_set_effect_param` | Add any effect; set or keyframe any parameter |
+| `ae_add_drop_shadow` / `ae_add_glow` / `ae_add_gaussian_blur` | One-call effect presets |
+| `ae_add_adjustment_layer` | Full-frame adjustment layer for a global grade/treatment |
+| `ae_set_blend_mode` | Layer blending modes (screen, add, multiply, …) |
+| `ae_add_mask` / `ae_animate_mask` | Rect/ellipse masks; keyframe expansion or feather for wipes |
+| `ae_add_trim_path` | Trim Paths line draw-on (adds a stroke if needed) |
+| `ae_set_track_matte` | Use the layer above as an alpha/luma matte |
+| `ae_set_layer_3d` | Toggle the 3D switch on a layer (or all of them) |
+| `ae_add_camera` / `ae_animate_camera` | Add a camera; keyframe a dolly / push-in / pan |
+
+**Scenes, timing, output, escape hatch**
+
+| Tool | What it does |
+| --- | --- |
+| `ae_create_precomp` | Precompose layers into a scene |
+| `ae_add_layer_to_comp` | Drop a precomp / footage item into another comp |
+| `ae_add_markers` | Comp or layer markers (beat / section sync) |
+| `ae_enable_time_remap` / `ae_animate_time_remap` | Speed ramps / freezes / reverse on footage & precomps |
+| `ae_add_device_frame` | Wrap a layer in a card / browser / phone mockup |
+| `ae_render_frame` / `ae_render_frames` | Render frame(s) to PNG and return the path(s) — the agent's review loop |
 | `ae_render_comp` | Render a comp to a video file via the Render Queue |
+| `ae_save_project` | Save / save-as the `.aep` |
 | `ae_eval` | Run arbitrary ExtendScript |
 
-A typical sequence: `ae_setup_comp` → `ae_create_shape` (button) → `ae_create_shape` (background frame) → `ae_morph_size` (frame stretches as the button moves) → `ae_add_button_press` → `ae_add_bounce_expression` on the button → `ae_create_null_path` to fly it in on a curve → child arrow gets `ae_add_timing_offset` → `ae_add_text_reveal` for the headline → finish with `ae_add_master_camera` → `ae_render_frame` to check it. See [`examples/demo-showreel.mjs`](examples/demo-showreel.mjs) for exactly that, runnable against a live After Effects.
+See **[`docs/SHOWREEL_PLAYBOOK.md`](docs/SHOWREEL_PLAYBOOK.md)** for how to sequence these into a polished reel, and [`examples/demo-showreel.mjs`](examples/demo-showreel.mjs) for a runnable mini-build.
 
 > **Notes:** ExtendScript match-names target current After Effects builds — if a tool errors on another version, `ae_eval` lets you patch around it (PRs welcome). Under the **Advanced 3D renderer** the `.value` getter on shape-layer spatial properties can throw, so OpenShowreel never reads it: pass `from` explicitly to `ae_animate_transform` if you need a non-default start value.
 
@@ -142,7 +162,7 @@ A typical sequence: `ae_setup_comp` → `ae_create_shape` (button) → `ae_creat
 
 ## Status
 
-🚧 Early development — the bridge and ~24 tools above are in place and verified live against After Effects 2026. Live behaviour depends on your After Effects version; expect to file/fix the odd match-name.
+🚧 Active development — the bridge and ~40 tools (composition, layers, motion mechanics, effects, masks/mattes, 3D camera, precomps, time remap, device mockups, rendering) are in place and verified live against After Effects 2026. Live behaviour depends on your After Effects version; expect to file/fix the odd match-name. The remaining gap toward fully autonomous reels is mostly **direction + assets**, not capability — see the playbook.
 
 ## License
 

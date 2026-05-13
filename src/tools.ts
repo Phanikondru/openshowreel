@@ -1026,4 +1026,196 @@ if (!did.length) throw new Error("Provide at least one of positionFrom/To or poi
 return "Animated camera '" + cam.name + "' (" + did.join(", ") + ") over " + A.startTime + "s-" + A.endTime + "s";
 `,
   },
+
+  // ── Phase 7: precomps/scenes, markers, time remap, device frames, previews ─
+
+  {
+    name: "ae_create_precomp",
+    description: "Precompose layers into a new composition (a 'scene') — keeps things organised and lets you apply effects/transforms to a whole group at once.",
+    schema: {
+      comp: z.string().optional().describe("The comp the layers currently live in."),
+      layers: z.array(z.string()).min(1).describe("Names of the layers to precompose."),
+      name: z.string().default("Scene"),
+      moveAllAttributes: z.boolean().default(true).describe("Move attributes (effects/transforms) into the new comp."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var idx = [];
+for (var i = 0; i < A.layers.length; i++) idx.push(OSR.layer(comp, A.layers[i]).index);
+var pre = comp.layers.precompose(idx, A.name, A.moveAllAttributes);
+return "Precomposed " + idx.length + " layer(s) of '" + comp.name + "' into '" + pre.name + "'";
+`,
+  },
+
+  {
+    name: "ae_add_layer_to_comp",
+    description: "Add an existing composition (a precomp/scene) or imported footage item into another composition as a layer.",
+    schema: {
+      targetComp: z.string().optional().describe("The comp to add the layer to. Defaults to the active comp."),
+      source: z.string().describe("Name of a composition or footage item in the project."),
+      position: Vec2.optional().describe("Layer position. Defaults to comp center."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var target = OSR.comp(A.targetComp);
+var src = null;
+for (var i = 1; i <= app.project.numItems; i++) { if (app.project.item(i).name === A.source) { src = app.project.item(i); break; } }
+if (!src) throw new Error("Project item not found: " + A.source);
+var L = target.layers.add(src);
+if (A.position && A.position.length === 2) OSR.tprop(L, "position").setValue(A.position);
+return "Added '" + src.name + "' to '" + target.name + "' as layer '" + L.name + "'";
+`,
+  },
+
+  {
+    name: "ae_add_markers",
+    description: "Add markers at the given times — on the composition timeline (for beat/section sync) or on a specific layer. Optional labels.",
+    schema: {
+      comp: z.string().optional(),
+      times: z.array(z.number()).min(1).describe("Marker times in seconds."),
+      labels: z.array(z.string()).optional().describe("Comments, parallel to `times`."),
+      layer: z.string().optional().describe("If given, add layer markers instead of comp markers."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var prop = A.layer ? OSR.layer(comp, A.layer).property("ADBE Marker") : comp.markerProperty;
+for (var i = 0; i < A.times.length; i++) {
+  prop.setValueAtTime(A.times[i], new MarkerValue((A.labels && A.labels[i]) ? A.labels[i] : ""));
+}
+return "Added " + A.times.length + " marker(s)" + (A.layer ? " to layer '" + A.layer + "'" : " to comp '" + comp.name + "'");
+`,
+  },
+
+  {
+    name: "ae_enable_time_remap",
+    description: "Enable Time Remapping on a layer whose source has a duration (footage, comp/precomp). Then keyframe it with ae_animate_time_remap for speed ramps / freeze frames.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+L.timeRemapEnabled = true;
+return "Time Remapping enabled on '" + L.name + "'";
+`,
+  },
+
+  {
+    name: "ae_animate_time_remap",
+    description: "Keyframe Time Remapping on a layer — each key maps a comp time to a source time (slow-mo, speed-up, freeze, reverse). Enables time remapping first if needed.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      keys: z.array(z.object({ at: z.number().describe("Comp time (s)."), source: z.number().describe("Source time (s) to show at that comp time.") })).min(2),
+      easing: z.enum(["linear", "easeIn", "easeOut", "easeInOut", "hold"]).default("linear"),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+if (!L.timeRemapEnabled) L.timeRemapEnabled = true;
+var tr = L.property("ADBE Time Remapping");
+for (var i = 0; i < A.keys.length; i++) tr.setValueAtTime(A.keys[i].at, A.keys[i].source);
+OSR.applyEase(tr, A.easing, 33);
+return "Time-remapped '" + L.name + "' with " + A.keys.length + " key(s) (" + A.easing + ")";
+`,
+  },
+
+  {
+    name: "ae_add_device_frame",
+    description: "Wrap a layer in a mockup frame — 'card' (rounded panel + shadow), 'browser' (panel + a top chrome bar with traffic-light dots), or 'phone' (tall rounded panel). The content layer is parented to the frame so they move together. Best on footage/precomp layers (a screenshot or UI scene).",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string().describe("The content layer to frame (e.g. a screenshot)."),
+      style: z.enum(["card", "browser", "phone"]).default("card"),
+      contentSize: Vec2.optional().describe("[w, h] of the content as displayed. Defaults to the layer's source size."),
+      padding: z.number().min(0).default(0).describe("Extra frame around the content (px)."),
+      cornerRadius: z.number().min(0).default(20),
+      frameColor: Color.default([1, 1, 1]),
+      shadow: z.boolean().default(true),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var cw = (A.contentSize && A.contentSize[0]) ? A.contentSize[0] : (L.width || comp.width);
+var ch = (A.contentSize && A.contentSize[1]) ? A.contentSize[1] : (L.height || comp.height);
+var chrome = (A.style === "browser") ? 56 : 0;
+var fw = cw + A.padding * 2;
+var fh = ch + A.padding * 2 + chrome;
+// frame shape, placed at the content layer's position (which sits at comp center by default for fresh layers)
+var cx = comp.width / 2, cy = comp.height / 2;
+var frame = comp.layers.addShape();
+frame.name = L.name + " Frame";
+frame.moveAfter(L); // frame goes behind the content
+var c1 = frame.property("ADBE Root Vectors Group").addProperty("ADBE Vector Group").property("ADBE Vectors Group");
+var r1 = c1.addProperty("ADBE Vector Shape - Rect");
+r1.property("ADBE Vector Rect Size").setValue([fw, fh]);
+r1.property("ADBE Vector Rect Roundness").setValue(A.cornerRadius);
+c1.addProperty("ADBE Vector Graphic - Fill").property("ADBE Vector Fill Color").setValue([A.frameColor[0], A.frameColor[1], A.frameColor[2], 1]);
+OSR.tprop(frame, "position").setValue([cx, cy]);
+if (A.shadow) {
+  var e = frame.property("ADBE Effect Parade").addProperty("ADBE Drop Shadow");
+  try { e.property("ADBE Drop Shadow-0002").setValue(110); } catch (x) {}
+  try { e.property("ADBE Drop Shadow-0004").setValue(28); } catch (x) {}
+  try { e.property("ADBE Drop Shadow-0005").setValue(80); } catch (x) {}
+}
+// nudge the content inside the frame (account for chrome bar at the top)
+OSR.tprop(L, "position").setValue([cx, cy + chrome / 2]);
+L.parent = frame;
+var madeChrome = false;
+if (A.style === "browser") {
+  var bar = comp.layers.addShape();
+  bar.name = L.name + " Chrome";
+  bar.moveBefore(L);
+  var rootC = bar.property("ADBE Root Vectors Group");
+  var cols = [[0.98, 0.36, 0.34], [0.99, 0.74, 0.18], [0.16, 0.78, 0.34]];
+  var dotX = -fw / 2 + 34;
+  for (var d = 0; d < 3; d++) {
+    var g = rootC.addProperty("ADBE Vector Group");
+    var gc = g.property("ADBE Vectors Group");
+    var el = gc.addProperty("ADBE Vector Shape - Ellipse");
+    el.property("ADBE Vector Ellipse Size").setValue([14, 14]);
+    el.property("ADBE Vector Ellipse Position").setValue([dotX + d * 26, 0]);
+    gc.addProperty("ADBE Vector Graphic - Fill").property("ADBE Vector Fill Color").setValue([cols[d][0], cols[d][1], cols[d][2], 1]);
+  }
+  OSR.tprop(bar, "position").setValue([cx, cy - fh / 2 + chrome / 2]);
+  bar.parent = frame;
+  madeChrome = true;
+}
+return "Wrapped '" + L.name + "' in a " + A.style + " frame (" + Math.round(fw) + "x" + Math.round(fh) + ")" + (A.shadow ? " with shadow" : "") + (madeChrome ? " + chrome bar" : "");
+`,
+  },
+
+  {
+    name: "ae_render_frames",
+    description: "Render several frames of a composition to PNGs at once — use it to review motion across a range of times. Returns the saved file paths.",
+    schema: {
+      comp: z.string().optional(),
+      times: z.array(z.number()).min(1).describe("Times in seconds to capture."),
+      outputDir: z.string().optional().describe("Directory for the PNGs. Defaults to the OS temp dir."),
+      prefix: z.string().default("openshowreel-frame"),
+    },
+    build: (a) => {
+      const dir = a.outputDir ?? tmpdir();
+      return `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+if (typeof comp.saveFrameToPng !== "function") throw new Error("This After Effects version has no saveFrameToPng — use ae_render_comp.");
+var dir = new Folder(${lit(dir)});
+var sep = (dir.fsName.charAt(dir.fsName.length - 1) === "/") ? "" : "/";
+var paths = [];
+for (var i = 0; i < A.times.length; i++) {
+  var p = dir.fsName + sep + A.prefix + "-" + String(A.times[i]).replace(/\\./g, "_") + "s.png";
+  comp.saveFrameToPng(A.times[i], new File(p));
+  paths.push(p);
+}
+return "Saved " + paths.length + " frame(s) of '" + comp.name + "':\\n" + paths.join("\\n");
+`;
+    },
+  },
 ];

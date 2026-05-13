@@ -45,6 +45,13 @@ const sampleArgs = {
   ae_set_layer_3d: { layer: "Box", enabled: true },
   ae_add_camera: { name: "Cam" },
   ae_animate_camera: { positionFrom: [960, 540, -1800], positionTo: [960, 540, -900] },
+  ae_create_precomp: { layers: ["Box"], name: "Scene 1" },
+  ae_add_layer_to_comp: { source: "Scene 1" },
+  ae_add_markers: { times: [0.5, 1.0, 1.5], labels: ["a", "b", "c"] },
+  ae_enable_time_remap: { layer: "Clip" },
+  ae_animate_time_remap: { layer: "Clip", keys: [{ at: 0, source: 0 }, { at: 2, source: 1 }] },
+  ae_add_device_frame: { layer: "Box", style: "browser" },
+  ae_render_frames: { times: [0.5, 1.0] },
 };
 
 test("every tool has a sample-args entry", () => {
