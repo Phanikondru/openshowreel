@@ -633,4 +633,168 @@ OSR.applyEase(op, "easeInOut", 33);
 return "Fade on '" + L.name + "'" + (A.fadeIn ? " in" : "") + (A.fadeOut ? " out" : "") + " (" + d + "s)";
 `,
   },
+
+  // ── Phase 5: effects, adjustment layers, blend modes ──────────────────────
+
+  {
+    name: "ae_add_effect",
+    description: "Add an effect to a layer by name or match-name (e.g. 'Drop Shadow', 'Gaussian Blur', 'CC Light Sweep', or a match-name like 'ADBE Drop Shadow'). Returns the effect's parameter names so you know what ae_set_effect_param can target.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      effect: z.string().describe("Effect display name or match-name."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var fx = L.property("ADBE Effect Parade");
+if (!fx.canAddProperty(A.effect)) throw new Error("Effect not available: '" + A.effect + "'");
+var e = fx.addProperty(A.effect);
+var params = [];
+for (var i = 1; i <= e.numProperties; i++) { var p = e.property(i); params.push(p.name + (p.matchName ? " [" + p.matchName + "]" : "")); }
+return "Added effect '" + e.name + "' to '" + L.name + "'. Params: " + params.join(" | ");
+`,
+  },
+
+  {
+    name: "ae_set_effect_param",
+    description: "Set a parameter of an effect on a layer (or keyframe it at a time). Reference the effect and parameter by name or 1-based index.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      effect: z.union([z.string(), z.number().int().positive()]).describe("Effect name or index on the layer."),
+      param: z.union([z.string(), z.number().int().positive()]).describe("Parameter name or index within the effect."),
+      value: z.union([z.number(), z.boolean(), z.array(z.number())]).describe("New value. Number/boolean for sliders/checkboxes/angles; [x,y] for points; [r,g,b] or [r,g,b,a] for colours."),
+      atTime: z.number().optional().describe("If given, set as a keyframe at this time instead of a static value."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var e = L.property("ADBE Effect Parade").property(A.effect);
+if (!e) throw new Error("Effect not found on '" + L.name + "': " + A.effect);
+var p = e.property(A.param);
+if (!p) throw new Error("Parameter not found on effect '" + e.name + "': " + A.param);
+var v = A.value;
+if (v instanceof Array && v.length === 3 && p.propertyValueType === PropertyValueType.COLOR) v = [v[0], v[1], v[2], 1];
+if (A.atTime !== undefined && A.atTime !== null) p.setValueAtTime(A.atTime, v);
+else p.setValue(v);
+return "Set " + e.name + " > " + p.name + " = " + (v instanceof Array ? "[" + v.join(", ") + "]" : v) + " on '" + L.name + "'" + (A.atTime != null ? " @" + A.atTime + "s" : "");
+`,
+  },
+
+  {
+    name: "ae_add_drop_shadow",
+    description: "Convenience: add a soft Drop Shadow to a layer with sensible defaults (you can fine-tune via ae_set_effect_param afterwards).",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      opacity: z.number().min(0).max(100).default(45).describe("Shadow opacity %."),
+      softness: z.number().min(0).default(40).describe("Blur radius (px)."),
+      distance: z.number().min(0).default(16).describe("Offset distance (px)."),
+      direction: z.number().default(135).describe("Direction in degrees."),
+      color: Color.default([0, 0, 0]),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var e = L.property("ADBE Effect Parade").addProperty("ADBE Drop Shadow");
+try { e.property("ADBE Drop Shadow-0001").setValue([A.color[0], A.color[1], A.color[2], 1]); } catch (x) {}
+try { e.property("ADBE Drop Shadow-0002").setValue(A.opacity * 2.55); } catch (x) {}
+try { e.property("ADBE Drop Shadow-0003").setValue(A.direction); } catch (x) {}
+try { e.property("ADBE Drop Shadow-0004").setValue(A.distance); } catch (x) {}
+try { e.property("ADBE Drop Shadow-0005").setValue(A.softness); } catch (x) {}
+return "Added '" + e.name + "' (Drop Shadow) to '" + L.name + "' — opacity " + A.opacity + "%, softness " + A.softness + "px, distance " + A.distance + "px. Reference it as '" + e.name + "' in ae_set_effect_param.";
+`,
+  },
+
+  {
+    name: "ae_add_glow",
+    description: "Convenience: add a Glow effect to a layer (great for UI highlights / logos). Tune further with ae_set_effect_param.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      threshold: z.number().min(0).max(100).default(50).describe("Glow threshold %."),
+      radius: z.number().min(0).default(30).describe("Glow radius."),
+      intensity: z.number().min(0).default(1.5).describe("Glow intensity."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var e = L.property("ADBE Effect Parade").addProperty("ADBE Glo2");
+try { e.property("ADBE Glo2-0002").setValue(A.threshold); } catch (x) {}
+try { e.property("ADBE Glo2-0003").setValue(A.radius); } catch (x) {}
+try { e.property("ADBE Glo2-0004").setValue(A.intensity); } catch (x) {}
+return "Added '" + e.name + "' (Glow) to '" + L.name + "' — threshold " + A.threshold + "%, radius " + A.radius + ", intensity " + A.intensity + ". Reference it as '" + e.name + "' in ae_set_effect_param.";
+`,
+  },
+
+  {
+    name: "ae_add_gaussian_blur",
+    description: "Convenience: add Gaussian Blur to a layer (use a small amount for depth, or keyframe it for a focus pull / transition).",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      blurriness: z.number().min(0).default(20),
+      repeatEdgePixels: z.boolean().default(true),
+      atTime: z.number().optional().describe("If given, keyframe the blurriness at this time instead of a static value."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var e = L.property("ADBE Effect Parade").addProperty("ADBE Gaussian Blur 2");
+var amt = e.property("ADBE Gaussian Blur 2-0001");
+if (A.atTime !== undefined && A.atTime !== null) amt.setValueAtTime(A.atTime, A.blurriness); else amt.setValue(A.blurriness);
+try { e.property("ADBE Gaussian Blur 2-0003").setValue(A.repeatEdgePixels ? 1 : 0); } catch (x) {}
+return "Added '" + e.name + "' (Gaussian Blur) to '" + L.name + "' = " + A.blurriness + (A.atTime != null ? " @" + A.atTime + "s" : "") + ". Reference it as '" + e.name + "' in ae_set_effect_param.";
+`,
+  },
+
+  {
+    name: "ae_add_adjustment_layer",
+    description: "Add a full-frame adjustment layer at the top of the stack — apply effects to it (e.g. via ae_add_effect / ae_add_glow) to grade or treat the whole comp at once.",
+    schema: {
+      comp: z.string().optional(),
+      name: z.string().default("Adjustment"),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = comp.layers.addSolid([1, 1, 1], A.name, comp.width, comp.height, comp.pixelAspect);
+L.adjustmentLayer = true;
+L.moveToBeginning();
+return "Added adjustment layer '" + L.name + "' at the top of '" + comp.name + "'";
+`,
+  },
+
+  {
+    name: "ae_set_blend_mode",
+    description: "Set a layer's blending mode (normal, multiply, screen, overlay, add, lighten, darken, soft-light, hard-light, color-dodge, color-burn, difference, luminosity).",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      mode: z.enum([
+        "normal", "multiply", "screen", "overlay", "add", "lighten", "darken",
+        "soft_light", "hard_light", "color_dodge", "color_burn", "difference", "luminosity",
+      ]).default("normal"),
+    },
+    build: (a) => {
+      const map: Record<string, string> = {
+        normal: "NORMAL", multiply: "MULTIPLY", screen: "SCREEN", overlay: "OVERLAY", add: "ADD",
+        lighten: "LIGHTEN", darken: "DARKEN", soft_light: "SOFT_LIGHT", hard_light: "HARD_LIGHT",
+        color_dodge: "CLASSIC_COLOR_DODGE", color_burn: "CLASSIC_COLOR_BURN", difference: "DIFFERENCE", luminosity: "LUMINOSITY",
+      };
+      return `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+L.blendingMode = BlendingMode.${map[(a.mode ?? "normal") as string]};
+return "Blend mode of '" + L.name + "' set to ${a.mode ?? "normal"}";
+`;
+    },
+  },
 ];

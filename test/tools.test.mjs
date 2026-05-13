@@ -31,6 +31,13 @@ const sampleArgs = {
   ae_animate_transform: { layer: "Box", property: "position", to: [960, 540] },
   ae_set_easing: { layer: "Box", property: "position", easing: "easeInOut" },
   ae_add_fade: { layer: "Box", fadeIn: true },
+  ae_add_effect: { layer: "Box", effect: "Drop Shadow" },
+  ae_set_effect_param: { layer: "Box", effect: "Drop Shadow", param: "Opacity", value: 50 },
+  ae_add_drop_shadow: { layer: "Box" },
+  ae_add_glow: { layer: "Box" },
+  ae_add_gaussian_blur: { layer: "Box", blurriness: 12 },
+  ae_add_adjustment_layer: { name: "Grade" },
+  ae_set_blend_mode: { layer: "Box", mode: "screen" },
 };
 
 test("every tool has a sample-args entry", () => {
