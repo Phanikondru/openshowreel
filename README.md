@@ -69,7 +69,10 @@ MCP client (Claude, etc.)  ──stdio──►  openshowreel server  ──osas
 npm install
 npm run build
 npm start          # or: npm run dev   (runs from source via tsx)
+npm test           # tool-builder + dry-run tests — no After Effects needed
 ```
+
+> Set `OPENSHOWREEL_DRY_RUN=1` to make every tool report what it *would* run instead of touching After Effects — handy for testing the wiring.
 
 ### Register with an MCP client
 
@@ -89,31 +92,57 @@ npm start          # or: npm run dev   (runs from source via tsx)
 
 ## Tools
 
-| Tool | Maps to the mechanic |
+**Composition & inspection**
+
+| Tool | What it does |
 | --- | --- |
 | `ae_scene_info` | Inspect comps, layers, fps, motion-blur state |
 | `ae_setup_comp` | New comp at **60 fps + motion blur** — the premium baseline |
+| `ae_save_project` | Save / save-as the `.aep` |
+
+**Layers**
+
+| Tool | What it does |
+| --- | --- |
 | `ae_create_shape` | Rounded-rect / ellipse shape layer with a fill (button, frame…) |
-| `ae_morph_size` | Animate Size on one axis only — the "constrain proportions OFF" stretch |
-| `ae_add_bounce_expression` | Paste a physics **bounce expression** onto scale / position / rotation |
-| `ae_add_timing_offset` | `.valueAtTime(time − delay)` — make a child trail its parent for organic motion |
-| `ae_add_button_press` | Tactile scale-down dip just before a major move |
+| `ae_create_solid` | Solid-colour layer (background / colour wash) |
+| `ae_create_text` | Plain text layer |
+| `ae_import_media` | Import an image / video / audio file, optionally place it in a comp |
 | `ae_parent_layer` | Layer-level pick-whip / parenting |
 | `ae_link_property` | Pick-whip one property to another via expression |
-| `ae_add_text_reveal` | Text Animator + Expression Selector staggered reveal (per char/word/line) |
-| `ae_create_null_path` | Null with centred anchor → parent shape → keyframe a curved, drift-free path |
+
+**Motion mechanics**
+
+| Tool | Maps to the mechanic |
+| --- | --- |
+| `ae_animate_transform` | Keyframe position / scale / rotation / opacity A→B with an easing preset |
+| `ae_set_easing` | Re-ease existing keyframes (linear / easeIn / easeOut / easeInOut / hold) |
+| `ae_add_fade` | Opacity fade-in / fade-out at the layer in/out points |
+| `ae_morph_size` | Animate Size on one axis only — the "constrain proportions OFF" stretch |
+| `ae_add_bounce_expression` | Paste a physics **bounce/overshoot expression** onto scale / position / rotation |
+| `ae_add_timing_offset` | `.valueAtTime(time − delay)` — make a child trail its parent for organic motion |
+| `ae_add_button_press` | Tactile scale-down dip just before a major move |
+| `ae_add_text_reveal` | Text Animator + Expression Selector staggered reveal (per char / word / line) |
+| `ae_create_null_path` | Pin a layer to an invisible Null, keyframe a curved, drift-free path |
 | `ae_add_master_camera` | One master Null over everything + slight tilt expression — the cinematic stitch |
-| `ae_eval` | Escape hatch: run arbitrary ExtendScript |
 
-A typical sequence: `ae_setup_comp` → `ae_create_shape` (button) → `ae_create_shape` (background frame) → `ae_morph_size` (frame stretches as the button moves) → `ae_add_button_press` → `ae_add_bounce_expression` on the button → `ae_create_null_path` to fly it in on a curve → child arrow gets `ae_add_timing_offset` → `ae_add_text_reveal` for the headline → finish with `ae_add_master_camera`. See [`examples/demo-showreel.mjs`](examples/demo-showreel.mjs) for exactly that, runnable against a live After Effects.
+**Output & escape hatch**
 
-> **Note:** the ExtendScript match-names target current After Effects builds. If a tool errors on an older/newer version, `ae_eval` lets you patch around it, and PRs adjusting match-names are welcome.
+| Tool | What it does |
+| --- | --- |
+| `ae_render_frame` | Render one frame to a PNG and return the path — so the agent can *see* its work |
+| `ae_render_comp` | Render a comp to a video file via the Render Queue |
+| `ae_eval` | Run arbitrary ExtendScript |
+
+A typical sequence: `ae_setup_comp` → `ae_create_shape` (button) → `ae_create_shape` (background frame) → `ae_morph_size` (frame stretches as the button moves) → `ae_add_button_press` → `ae_add_bounce_expression` on the button → `ae_create_null_path` to fly it in on a curve → child arrow gets `ae_add_timing_offset` → `ae_add_text_reveal` for the headline → finish with `ae_add_master_camera` → `ae_render_frame` to check it. See [`examples/demo-showreel.mjs`](examples/demo-showreel.mjs) for exactly that, runnable against a live After Effects.
+
+> **Notes:** ExtendScript match-names target current After Effects builds — if a tool errors on another version, `ae_eval` lets you patch around it (PRs welcome). Under the **Advanced 3D renderer** the `.value` getter on shape-layer spatial properties can throw, so OpenShowreel never reads it: pass `from` explicitly to `ae_animate_transform` if you need a non-default start value.
 
 ---
 
 ## Status
 
-🚧 Early development — the bridge and the 13 tools above are in place. Live behaviour depends on your After Effects version; expect to file/fix the odd match-name.
+🚧 Early development — the bridge and ~24 tools above are in place and verified live against After Effects 2026. Live behaviour depends on your After Effects version; expect to file/fix the odd match-name.
 
 ## License
 

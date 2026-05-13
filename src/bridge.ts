@@ -171,7 +171,11 @@ export type RunOptions = {
  * The body may `return` any value; it is wrapped in an undo group and a try/catch
  * that writes the outcome to a temp file we read back (DoScript has no return channel).
  */
+/** When OPENSHOWREEL_DRY_RUN is set, tools don't touch After Effects — useful for tests/CI. */
+export const isDryRun = (): boolean => !!process.env.OPENSHOWREEL_DRY_RUN;
+
 export async function runJsx(body: string, opts: RunOptions = {}): Promise<string> {
+  if (isDryRun()) return `[dry-run] would execute ${body.split("\n").length} lines of ExtendScript in After Effects`;
   const dir = await mkdtemp(join(tmpdir(), "openshowreel-"));
   const scriptPath = join(dir, "osr.jsx");
   const resultPath = join(dir, "result.txt");
