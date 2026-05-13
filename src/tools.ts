@@ -797,4 +797,233 @@ return "Blend mode of '" + L.name + "' set to ${a.mode ?? "normal"}";
 `;
     },
   },
+
+  // ── Phase 6: masks, trim paths, track mattes, 3D & camera ─────────────────
+
+  {
+    name: "ae_add_mask",
+    description: "Add a rectangular or elliptical mask to a layer. Bounds are in the layer's own pixel space ([left, top, right, bottom]); omit them to mask the whole layer. Combine with ae_animate_mask for wipe-style reveals.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      shape: z.enum(["rect", "ellipse"]).default("rect"),
+      bounds: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional().describe("[left, top, right, bottom] in layer space. Defaults to the whole layer."),
+      feather: z.number().min(0).default(0),
+      expansion: z.number().default(0).describe("Mask expansion (px). Negative shrinks."),
+      mode: z.enum(["add", "subtract", "intersect", "none"]).default("add"),
+      inverted: z.boolean().default(false),
+      name: z.string().optional(),
+    },
+    build: (a) => {
+      const modeMap: Record<string, string> = { add: "ADD", subtract: "SUBTRACT", intersect: "INTERSECT", none: "NONE" };
+      const maskMode = `MaskMode.${modeMap[(a.mode ?? "add") as string]}`;
+      return `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var b = (A.bounds && A.bounds.length === 4) ? A.bounds : [0, 0, (L.width || comp.width), (L.height || comp.height)];
+var l = b[0], t = b[1], r = b[2], bt = b[3];
+var s = new Shape();
+if (A.shape === "ellipse") {
+  var cx = (l + r) / 2, cy = (t + bt) / 2, rx = (r - l) / 2, ry = (bt - t) / 2, k = 0.5522847498;
+  s.vertices = [[cx, t], [r, cy], [cx, bt], [l, cy]];
+  s.inTangents = [[-rx * k, 0], [0, -ry * k], [rx * k, 0], [0, ry * k]];
+  s.outTangents = [[rx * k, 0], [0, ry * k], [-rx * k, 0], [0, -ry * k]];
+} else {
+  s.vertices = [[l, t], [r, t], [r, bt], [l, bt]];
+}
+s.closed = true;
+var m = L.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
+if (A.name) m.name = A.name;
+m.maskMode = ${maskMode};
+m.property("ADBE Mask Shape").setValue(s);
+if (A.feather) m.property("ADBE Mask Feather").setValue([A.feather, A.feather]);
+if (A.expansion) m.property("ADBE Mask Offset").setValue(A.expansion);
+m.inverted = !!A.inverted;
+return "Added " + A.shape + " mask '" + m.name + "' to '" + L.name + "' (mode ${a.mode ?? "add"}" + (A.inverted ? ", inverted" : "") + ")";
+`;
+    },
+  },
+
+  {
+    name: "ae_animate_mask",
+    description: "Keyframe a mask's expansion or feather between two values — e.g. animate expansion from a small value to large to wipe a layer on/off.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      mask: z.union([z.string(), z.number().int().positive()]).default(1).describe("Mask name or 1-based index on the layer."),
+      property: z.enum(["expansion", "feather"]).default("expansion"),
+      from: z.number(),
+      to: z.number(),
+      startTime: z.number().default(0),
+      endTime: z.number().default(1),
+      easing: z.enum(["linear", "easeIn", "easeOut", "easeInOut", "hold"]).default("easeInOut"),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var m = L.property("ADBE Mask Parade").property(A.mask);
+if (!m) throw new Error("Mask not found on '" + L.name + "': " + A.mask);
+var p = (A.property === "feather") ? m.property("ADBE Mask Feather") : m.property("ADBE Mask Offset");
+var isArr = (A.property === "feather");
+p.setValueAtTime(A.startTime, isArr ? [A.from, A.from] : A.from);
+p.setValueAtTime(A.endTime, isArr ? [A.to, A.to] : A.to);
+OSR.applyEase(p, A.easing, 33);
+return "Animated mask " + A.property + " on '" + L.name + "': " + A.from + " -> " + A.to + " (" + A.startTime + "s-" + A.endTime + "s)";
+`,
+  },
+
+  {
+    name: "ae_add_trim_path",
+    description: "Add Trim Paths to a shape layer and (by default) animate it so the stroke draws on. Adds a stroke first if the shape has none. Best on shapes made by ae_create_shape.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string().describe("A shape layer."),
+      drawOn: z.boolean().default(true).describe("Animate End 0→100% over the time range."),
+      startTime: z.number().default(0),
+      endTime: z.number().default(1),
+      addStroke: z.boolean().default(true),
+      strokeColor: Color.default([1, 1, 1]),
+      strokeWidth: z.number().positive().default(8),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var root = L.property("ADBE Root Vectors Group");
+if (!root) throw new Error("'" + L.name + "' is not a shape layer.");
+// pick the first vector group, or create one
+var grp = null;
+for (var i = 1; i <= root.numProperties; i++) { if (root.property(i).matchName === "ADBE Vector Group") { grp = root.property(i); break; } }
+if (!grp) { grp = root.addProperty("ADBE Vector Group"); }
+var contents = grp.property("ADBE Vectors Group");
+// ensure a stroke exists in this group
+var hasStroke = false;
+for (var j = 1; j <= contents.numProperties; j++) { if (contents.property(j).matchName === "ADBE Vector Graphic - Stroke") { hasStroke = true; break; } }
+if (!hasStroke && A.addStroke) {
+  var st = contents.addProperty("ADBE Vector Graphic - Stroke");
+  try { st.property("ADBE Vector Stroke Color").setValue([A.strokeColor[0], A.strokeColor[1], A.strokeColor[2], 1]); } catch (e) {}
+  try { st.property("ADBE Vector Stroke Width").setValue(A.strokeWidth); } catch (e) {}
+}
+var trim = contents.addProperty("ADBE Vector Filter - Trim");
+var endP = trim.property("ADBE Vector Trim End");
+if (A.drawOn) {
+  endP.setValueAtTime(A.startTime, 0);
+  endP.setValueAtTime(A.endTime, 100);
+  OSR.applyEase(endP, "easeInOut", 33);
+} else {
+  endP.setValue(100);
+}
+return "Trim Paths added to '" + L.name + "'" + (A.drawOn ? " — draws on " + A.startTime + "s-" + A.endTime + "s" : "");
+`,
+  },
+
+  {
+    name: "ae_set_track_matte",
+    description: "Use the layer directly above as a track matte for this layer (alpha or luma, normal or inverted). Pass 'none' to clear it. The matte layer should be just above the target in the layer stack.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string().describe("The layer that gets matted (the one below)."),
+      type: z.enum(["alpha", "alpha_inverted", "luma", "luma_inverted", "none"]).default("alpha"),
+    },
+    build: (a) => {
+      const map: Record<string, string> = {
+        alpha: "ALPHA", alpha_inverted: "ALPHA_INVERTED", luma: "LUMA", luma_inverted: "LUMA_INVERTED", none: "NO_TRACK_MATTE",
+      };
+      return `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+L.trackMatteType = TrackMatteType.${map[(a.type ?? "alpha") as string]};
+return "Track matte of '" + L.name + "' set to ${a.type ?? "alpha"}";
+`;
+    },
+  },
+
+  {
+    name: "ae_set_layer_3d",
+    description: "Toggle a layer's 3D switch (or every layer in the comp). Required before a camera move affects 2D layers.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string().optional().describe("A single layer. Ignored if allLayers is true."),
+      allLayers: z.boolean().default(false).describe("Apply to every layer in the comp."),
+      enabled: z.boolean().default(true),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var n = 0;
+if (A.allLayers) {
+  for (var i = 1; i <= comp.numLayers; i++) { var L = comp.layer(i); if (L.threeDLayer !== undefined) { try { L.threeDLayer = !!A.enabled; n++; } catch (e) {} } }
+} else {
+  if (!A.layer) throw new Error("Provide a layer name, or set allLayers: true.");
+  OSR.layer(comp, A.layer).threeDLayer = !!A.enabled;
+  n = 1;
+}
+return (A.enabled ? "Enabled" : "Disabled") + " 3D on " + n + " layer(s) in '" + comp.name + "'";
+`,
+  },
+
+  {
+    name: "ae_add_camera",
+    description: "Add a Camera layer to the comp (becomes the active camera). Animate it with ae_animate_camera — remember 2D layers need their 3D switch on (ae_set_layer_3d) to be affected.",
+    schema: {
+      comp: z.string().optional(),
+      name: z.string().default("Camera"),
+      enableDepthOfField: z.boolean().default(false),
+      focusDistance: z.number().positive().optional(),
+      aperture: z.number().positive().optional(),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var cam = comp.layers.addCamera(A.name, [comp.width / 2, comp.height / 2]);
+var co = cam.property("ADBE Camera Options Group");
+if (A.enableDepthOfField) { try { co.property("ADBE Camera Depth of Field").setValue(1); } catch (e) {} }
+if (A.focusDistance != null) { try { co.property("ADBE Camera Focus Distance").setValue(A.focusDistance); } catch (e) {} }
+if (A.aperture != null) { try { co.property("ADBE Aperture").setValue(A.aperture); } catch (e) {} }
+return "Added camera '" + cam.name + "' to '" + comp.name + "'" + (A.enableDepthOfField ? " (DOF on)" : "");
+`,
+  },
+
+  {
+    name: "ae_animate_camera",
+    description: "Keyframe a camera's position and/or point of interest between two 3D points — a dolly / push-in / pan. If no camera name is given, the first camera in the comp is used.",
+    schema: {
+      comp: z.string().optional(),
+      camera: z.string().optional().describe("Camera layer name. Defaults to the first camera."),
+      positionFrom: z.array(z.number()).optional().describe("[x,y,z] start position."),
+      positionTo: z.array(z.number()).optional().describe("[x,y,z] end position."),
+      pointOfInterestFrom: z.array(z.number()).optional().describe("[x,y,z] start look-at point."),
+      pointOfInterestTo: z.array(z.number()).optional().describe("[x,y,z] end look-at point."),
+      startTime: z.number().default(0),
+      endTime: z.number().default(2),
+      easing: z.enum(["linear", "easeIn", "easeOut", "easeInOut", "hold"]).default("easeInOut"),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var cam = null;
+if (A.camera) { cam = OSR.layer(comp, A.camera); }
+else { for (var i = 1; i <= comp.numLayers; i++) { if (comp.layer(i) instanceof CameraLayer) { cam = comp.layer(i); break; } } }
+if (!cam) throw new Error("No camera in '" + comp.name + "' — add one with ae_add_camera.");
+function pad3(v) { var a = []; for (var i = 0; i < 3; i++) a.push(i < v.length ? v[i] : 0); return a; }
+function keyPair(prop, from, to) {
+  if (from) prop.setValueAtTime(A.startTime, pad3(from));
+  if (to) prop.setValueAtTime(A.endTime, pad3(to));
+  if (prop.numKeys > 0) OSR.applyEase(prop, A.easing, 33);
+}
+var t = cam.property("ADBE Transform Group");
+var did = [];
+if (A.positionFrom || A.positionTo) { keyPair(t.property("ADBE Position"), A.positionFrom, A.positionTo); did.push("position"); }
+if (A.pointOfInterestFrom || A.pointOfInterestTo) {
+  var poi = t.property("ADBE Pt of Interest") || t.property("ADBE Anchor Point");
+  if (!poi) throw new Error("This camera has no Point of Interest (one-node camera).");
+  keyPair(poi, A.pointOfInterestFrom, A.pointOfInterestTo); did.push("point of interest");
+}
+if (!did.length) throw new Error("Provide at least one of positionFrom/To or pointOfInterestFrom/To.");
+return "Animated camera '" + cam.name + "' (" + did.join(", ") + ") over " + A.startTime + "s-" + A.endTime + "s";
+`,
+  },
 ];

@@ -38,6 +38,13 @@ const sampleArgs = {
   ae_add_gaussian_blur: { layer: "Box", blurriness: 12 },
   ae_add_adjustment_layer: { name: "Grade" },
   ae_set_blend_mode: { layer: "Box", mode: "screen" },
+  ae_add_mask: { layer: "Box", shape: "rect", bounds: [0, 0, 200, 100] },
+  ae_animate_mask: { layer: "Box", mask: 1, property: "expansion", from: -100, to: 0 },
+  ae_add_trim_path: { layer: "Box", drawOn: true },
+  ae_set_track_matte: { layer: "Box", type: "alpha" },
+  ae_set_layer_3d: { layer: "Box", enabled: true },
+  ae_add_camera: { name: "Cam" },
+  ae_animate_camera: { positionFrom: [960, 540, -1800], positionTo: [960, 540, -900] },
 };
 
 test("every tool has a sample-args entry", () => {
@@ -47,7 +54,7 @@ test("every tool has a sample-args entry", () => {
 test("tool definitions are well-formed", () => {
   const seen = new Set();
   for (const tool of tools) {
-    assert.match(tool.name, /^ae_[a-z_]+$/, `bad tool name: ${tool.name}`);
+    assert.match(tool.name, /^ae_[a-z0-9_]+$/, `bad tool name: ${tool.name}`);
     assert.ok(!seen.has(tool.name), `duplicate tool name: ${tool.name}`);
     seen.add(tool.name);
     assert.ok(tool.description && tool.description.length > 10, `${tool.name}: weak description`);
