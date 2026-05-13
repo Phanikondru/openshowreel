@@ -461,4 +461,94 @@ if (item.status === RQItemStatus.DONE) return "Rendered '" + comp.name + "' to "
 throw new Error("Render finished with status " + item.status + " for '" + comp.name + "'");
 `,
   },
+
+  // ── Phase 2: core layer primitives ────────────────────────────────────────
+
+  {
+    name: "ae_create_solid",
+    description: "Add a solid-colour layer — handy as a background or a colour wash. Defaults to comp size.",
+    schema: {
+      comp: z.string().optional(),
+      name: z.string().default("Solid"),
+      color: Color.default([0, 0, 0]),
+      width: z.number().int().positive().optional().describe("Defaults to comp width."),
+      height: z.number().int().positive().optional().describe("Defaults to comp height."),
+      position: Vec2.optional().describe("Defaults to comp center."),
+      opacity: z.number().min(0).max(100).default(100),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var w = A.width || comp.width, h = A.height || comp.height;
+var L = comp.layers.addSolid([A.color[0], A.color[1], A.color[2]], A.name, w, h, comp.pixelAspect);
+if (A.position && A.position.length === 2) OSR.tprop(L, "position").setValue(A.position);
+if (A.opacity != null) OSR.tprop(L, "opacity").setValue(A.opacity);
+return "Created solid '" + L.name + "' " + w + "x" + h;
+`,
+  },
+
+  {
+    name: "ae_create_text",
+    description: "Add a plain text layer (no animator). For an animated reveal use ae_add_text_reveal instead.",
+    schema: {
+      comp: z.string().optional(),
+      text: z.string(),
+      name: z.string().optional().describe("Defaults to the text content."),
+      position: Vec2.optional().describe("Defaults to comp center."),
+      fontSize: z.number().positive().default(100),
+      color: Color.default([1, 1, 1]),
+      font: z.string().optional().describe("PostScript font name, e.g. 'Inter-Bold'."),
+      justification: z.enum(["left", "center", "right"]).default("center"),
+    },
+    build: (a) => {
+      const just = { left: "LEFT_JUSTIFY", center: "CENTER_JUSTIFY", right: "RIGHT_JUSTIFY" }[(a.justification ?? "center") as "left" | "center" | "right"];
+      return `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = comp.layers.addText(A.text);
+L.name = A.name || A.text;
+var td = L.property("ADBE Text Properties").property("ADBE Text Document");
+var doc = td.value;
+doc.fontSize = A.fontSize;
+if (A.font) doc.font = A.font;
+doc.applyFill = true;
+doc.fillColor = [A.color[0], A.color[1], A.color[2]];
+try { doc.justification = ParagraphJustification.${just}; } catch (e) {}
+td.setValue(doc);
+var pos = (A.position && A.position.length === 2) ? A.position : [comp.width / 2, comp.height / 2];
+OSR.tprop(L, "position").setValue(pos);
+return "Created text layer '" + L.name + "' at [" + pos[0] + ", " + pos[1] + "]";
+`;
+    },
+  },
+
+  {
+    name: "ae_import_media",
+    description: "Import an image / video / audio file into the project, and optionally place it in a composition.",
+    schema: {
+      filePath: z.string().describe("Absolute path to the media file."),
+      addToComp: z.boolean().default(true),
+      comp: z.string().optional().describe("Target comp when addToComp is true. Defaults to the active comp."),
+      position: Vec2.optional().describe("Layer position when added. Defaults to comp center."),
+      scaleToFit: z.boolean().default(false).describe("Scale the layer to cover the comp frame."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var f = new File(A.filePath);
+if (!f.exists) throw new Error("File not found: " + A.filePath);
+var item = app.project.importFile(new ImportOptions(f));
+var msg = "Imported '" + item.name + "'";
+if (A.addToComp) {
+  var comp = OSR.comp(A.comp);
+  var L = comp.layers.add(item);
+  if (A.position && A.position.length === 2) OSR.tprop(L, "position").setValue(A.position);
+  if (A.scaleToFit && item.width && item.height) {
+    var s = Math.max(comp.width / item.width, comp.height / item.height) * 100;
+    OSR.tprop(L, "scale").setValue([s, s]);
+  }
+  msg += " → comp '" + comp.name + "' as layer '" + L.name + "'";
+}
+return msg;
+`,
+  },
 ];
