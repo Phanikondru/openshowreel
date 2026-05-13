@@ -1,14 +1,22 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
+import type { RunOptions } from "./bridge.js";
 
 export type ShowreelTool = {
   name: string;
   description: string;
   schema: z.ZodRawShape;
   build: (args: Record<string, any>) => string;
+  /** Per-tool overrides for the AppleScript round-trip (e.g. a longer timeout for renders). */
+  runOptions?: RunOptions;
 };
 
 /** JSON-encode a JS value into an ExtendScript-safe literal. */
 const lit = (v: unknown): string => JSON.stringify(v);
+
+/** A timestamped path under the OS temp dir, for default render outputs. */
+const tmpOut = (prefix: string, ext: string): string => join(tmpdir(), `${prefix}-${Date.now()}.${ext}`);
 
 const Vec2 = z.tuple([z.number(), z.number()]);
 const Color = z.tuple([z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1)]);
@@ -133,24 +141,28 @@ return "Morphed Size of '" + L.name + "': [" + from[0] + "x" + from[1] + "] -> [
 
   {
     name: "ae_add_bounce_expression",
-    description: "Apply a physics 'bounce' expression to a property (scale, position, or rotation) instead of hand-keying springiness. Once applied, any keyframe you set on that property will overshoot and settle naturally.",
+    description: "Apply a physics 'bounce' (overshoot) expression to a property (scale, position, or rotation) instead of hand-keying springiness. Once applied, any keyframe you set on that property will overshoot and settle naturally. Based on the well-worn Dan Ebberts overshoot — robust against overflow.",
     schema: {
       comp: z.string().optional(),
       layer: z.string(),
       property: z.enum(["scale", "position", "rotation"]).default("scale"),
-      amplitude: z.number().default(0.12).describe("Overshoot strength."),
-      frequency: z.number().default(2.0).describe("Oscillations per second."),
-      decay: z.number().default(6.0).describe("How quickly the bounce settles."),
+      amplitude: z.number().default(0.12).describe("Overshoot scale — multiplies the post-keyframe velocity."),
+      frequency: z.number().default(2.5).describe("Oscillations per second."),
+      decay: z.number().default(5.0).describe("How quickly the bounce settles (higher = snappier)."),
     },
     build: (a) => {
       const expr =
         `amp = ${a.amplitude ?? 0.12};\n` +
-        `freq = ${a.frequency ?? 2.0};\n` +
-        `decay = ${a.decay ?? 6.0};\n` +
+        `freq = ${a.frequency ?? 2.5};\n` +
+        `decay = ${a.decay ?? 5.0};\n` +
         `n = 0;\n` +
-        `if (numKeys > 0){ n = nearestKey(time).index; if (key(n).time > time){ n--; } }\n` +
-        `if (n == 0){ t = 0; } else { t = time - key(n).time; }\n` +
-        `if (n > 0 && t < 3){ v = velocityAtTime(key(n).time - thisComp.frameDuration/10); value + v*amp*Math.sin(freq*t*2*Math.PI)/Math.exp(decay*t); } else { value }`;
+        `if (numKeys > 0){ n = nearestKey(time).index; if (key(n).time > time) n--; }\n` +
+        `if (n > 0){\n` +
+        `  t = time - key(n).time;\n` +
+        `  v = velocityAtTime(key(n).time - thisComp.frameDuration/10);\n` +
+        `  w = freq*Math.PI*2;\n` +
+        `  value + v*amp*(Math.sin(t*w)/Math.exp(decay*t)/w);\n` +
+        `} else value`;
       return `
 var A = ${lit(a)};
 var comp = OSR.comp(A.comp);
@@ -269,11 +281,13 @@ return A.property + " of '" + L.name + "' linked to ${tProp} of '" + A.targetLay
       staggerSeconds: z.number().positive().default(0.9).describe("Total time across which the whole reveal staggers."),
     },
     build: (a) => {
+      // Selector amount 100 = "animator fully applied" = glyph off-screen at 0% opacity;
+      // amount 0 = glyph at rest (revealed). So each glyph eases 100 -> 0 over its slot.
       const expr =
         `n = textTotal;\n` +
         `seg = ${a.staggerSeconds ?? 0.9} / Math.max(n, 1);\n` +
         `t = time - inPoint - ${a.startTime ?? 0} - (textIndex - 1) * seg;\n` +
-        `clamp(ease(t, 0, seg, 0, 100), 0, 100)`;
+        `clamp(ease(t, 0, seg, 100, 0), 0, 100)`;
       return `
 var A = ${lit(a)};
 var comp = OSR.comp(A.comp);
@@ -383,5 +397,68 @@ if (A.driftPx) OSR.tprop(master, "position").expression = ${lit(driftExpr)};
 return "Master camera '" + master.name + "' created; attached " + attached.length + " layer(s): " + attached.join(", ") + ". Whole comp now gets a subtle " + A.tiltDegrees + " deg tilt.";
 `;
     },
+  },
+
+  // ── Phase 1: output & project lifecycle ───────────────────────────────────
+
+  {
+    name: "ae_save_project",
+    description: "Save the After Effects project (.aep). Pass a path to save-as / create the file; omit it to save in place (requires the project to already have a file).",
+    schema: {
+      path: z.string().optional().describe("Absolute .aep path. Omit to save in place."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+if (A.path) { app.project.save(new File(A.path)); }
+else { if (!app.project.file) throw new Error("Project has never been saved — pass a path."); app.project.save(); }
+return "Saved project: " + app.project.file.fsName;
+`,
+  },
+
+  {
+    name: "ae_render_frame",
+    description: "Render a single frame of a composition to a PNG and return its file path — use it to actually look at what you've built. Fast (no Render Queue).",
+    schema: {
+      comp: z.string().optional(),
+      time: z.number().default(0).describe("Time in seconds of the frame to capture."),
+      outputPath: z.string().optional().describe("Absolute .png path. Defaults to a timestamped file in the OS temp dir."),
+    },
+    build: (a) => {
+      const out = a.outputPath ?? tmpOut("openshowreel-frame", "png");
+      return `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var dst = ${lit(out)};
+if (typeof comp.saveFrameToPng !== "function") throw new Error("This After Effects version has no saveFrameToPng — use the Render Queue (ae_render_comp) instead.");
+comp.saveFrameToPng(A.time, new File(dst));
+return "Saved frame at " + A.time + "s of '" + comp.name + "' to " + dst;
+`;
+    },
+  },
+
+  {
+    name: "ae_render_comp",
+    description: "Render a composition to a video file via the Render Queue. Blocking — can take a while. Returns the output path on success.",
+    schema: {
+      comp: z.string().optional(),
+      outputPath: z.string().describe("Absolute output path, e.g. /tmp/showreel.mov or .mp4."),
+      template: z.string().optional().describe("Output Module template name to apply (varies by install, e.g. 'H.264 - Match Render Settings - 15 Mbps'). Optional — falls back to the install default."),
+      renderSettingsTemplate: z.string().optional().describe("Render Settings template name. Optional."),
+    },
+    runOptions: { timeoutMs: 30 * 60_000 },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var rq = app.project.renderQueue;
+var item = rq.items.add(comp);
+if (A.renderSettingsTemplate) { try { item.applyTemplate(A.renderSettingsTemplate); } catch (e) {} }
+var om = item.outputModule(1);
+if (A.template) { try { om.applyTemplate(A.template); } catch (e) {} }
+om.file = new File(A.outputPath);
+item.render = true;
+rq.render();
+if (item.status === RQItemStatus.DONE) return "Rendered '" + comp.name + "' to " + om.file.fsName;
+throw new Error("Render finished with status " + item.status + " for '" + comp.name + "'");
+`,
   },
 ];

@@ -12,7 +12,7 @@ for (const tool of tools) {
     { description: tool.description, inputSchema: tool.schema },
     async (args: Record<string, unknown>) => {
       try {
-        const out = await runJsx(tool.build(args ?? {}));
+        const out = await runJsx(tool.build(args ?? {}), tool.runOptions);
         return { content: [{ type: "text" as const, text: out }] };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

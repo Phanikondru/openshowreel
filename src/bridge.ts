@@ -108,12 +108,17 @@ async function resolveAppName(): Promise<string> {
   return cachedAppName;
 }
 
+export type RunOptions = {
+  /** Hard timeout for the AppleScript round-trip. Default 180 s. Bump it for renders. */
+  timeoutMs?: number;
+};
+
 /**
  * Run an ExtendScript body inside After Effects and return its result string.
  * The body may `return` any value; it is wrapped in an undo group and a try/catch
  * that writes the outcome to a temp file we read back (DoScript has no return channel).
  */
-export async function runJsx(body: string): Promise<string> {
+export async function runJsx(body: string, opts: RunOptions = {}): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "openshowreel-"));
   const scriptPath = join(dir, "osr.jsx");
   const resultPath = join(dir, "result.txt");
@@ -130,7 +135,7 @@ export async function runJsx(body: string): Promise<string> {
     await execFileP(
       "osascript",
       ["-e", `tell application ${JSON.stringify(appName)} to DoScript ${asLiteral}`],
-      { timeout: 180_000 },
+      { timeout: opts.timeoutMs ?? 180_000 },
     );
   } catch (e) {
     execErr = e;
