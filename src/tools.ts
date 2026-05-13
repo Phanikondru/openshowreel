@@ -131,7 +131,7 @@ var comp = OSR.comp(A.comp);
 var L = OSR.layer(comp, A.layer);
 var sz = OSR.findShapeSize(L.property("ADBE Root Vectors Group"));
 if (!sz) throw new Error("No rectangle/ellipse Size found on shape layer '" + L.name + "'");
-var from = (A.from && A.from.length === 2) ? A.from : sz.value;
+var from = (A.from && A.from.length === 2) ? A.from : ((function () { try { return sz.value; } catch (e) { return A.to; } })());
 sz.setValueAtTime(A.startTime, [from[0], from[1]]);
 sz.setValueAtTime(A.endTime, [A.to[0], A.to[1]]);
 if (A.ease) OSR.easeKeys(sz);
@@ -198,7 +198,7 @@ return A.property + " of '" + L.name + "' now trails '" + A.leaderLayer + "' by 
 
   {
     name: "ae_add_button_press",
-    description: "Add a tactile 'button press' micro-interaction: a quick scale-down dip and release just before a major on-screen movement begins. Inserts three Scale keyframes around `atTime`.",
+    description: "Add a tactile 'button press' micro-interaction: a quick scale-down dip and release just before a major on-screen movement begins. Inserts three Scale keyframes around `atTime` (assumes the layer rests at 100% scale).",
     schema: {
       comp: z.string().optional(),
       layer: z.string(),
@@ -211,7 +211,7 @@ var A = ${lit(a)};
 var comp = OSR.comp(A.comp);
 var L = OSR.layer(comp, A.layer);
 var s = OSR.tprop(L, "scale");
-var base = s.value;
+var base = OSR.fill(s, 100); // press assumes the layer rests at 100% scale
 var t0 = A.atTime - A.durationSeconds, t1 = A.atTime - A.durationSeconds * 0.5, t2 = A.atTime;
 s.setValueAtTime(t0, OSR.scaleArray(base, 1));
 s.setValueAtTime(t1, OSR.scaleArray(base, A.depth));
@@ -320,11 +320,11 @@ return "Text reveal '" + tl.name + "' created — staggered per " + A.basedOn + 
 
   {
     name: "ae_create_null_path",
-    description: "Move a layer along a (optionally curved) path the safe way: create an invisible Null with its anchor at the layer's centre, parent the layer to the Null, and keyframe the Null's position through your points. When the Null is stationary the layer can't drift — which raw curved keyframes on the layer itself would cause.",
+    description: "Move a layer along a (optionally curved) path the safe way: create an invisible Null whose pivot the layer is pinned to, parent the layer to the Null, and keyframe the Null's position through your points. When the Null is stationary the layer can't drift — which raw curved keyframes on the layer itself would cause. NOTE: the layer is repositioned to ride the Null, so make points[0] its desired start.",
     schema: {
       comp: z.string().optional(),
       layer: z.string().describe("The layer to move."),
-      points: z.array(Vec2).min(2).describe("Path points [[x,y], ...] the layer travels through, in order."),
+      points: z.array(Vec2).min(2).describe("Path points [[x,y], ...] the layer travels through, in order. points[0] is where the layer starts."),
       startTime: z.number().default(0),
       endTime: z.number().default(2),
       curved: z.boolean().default(true).describe("Auto-bezier the spatial path (vs. straight linear segments)."),
@@ -338,11 +338,11 @@ var nul = comp.layers.addNull(comp.duration);
 nul.name = A.nullName || (L.name + " PATH");
 nul.label = 9;
 OSR.tprop(nul, "anchor").setValue([50, 50]); // null source is 100x100 — centre its pivot
-var sp = OSR.tprop(L, "position").value;
-var np = OSR.tprop(nul, "position");
-np.setValue([sp[0], sp[1]]);
-L.setParentWithJump(nul);
 var pts = A.points, t0 = A.startTime, t1 = A.endTime;
+var np = OSR.tprop(nul, "position");
+np.setValue([pts[0][0], pts[0][1]]);
+L.parent = nul;
+OSR.tprop(L, "position").setValue([50, 50]); // pin the layer to the null's pivot so it rides the path exactly
 for (var i = 0; i < pts.length; i++) {
   var f = (pts.length === 1) ? 0 : (i / (pts.length - 1));
   np.setValueAtTime(t0 + (t1 - t0) * f, [pts[i][0], pts[i][1]]);
@@ -549,6 +549,88 @@ if (A.addToComp) {
   msg += " → comp '" + comp.name + "' as layer '" + L.name + "'";
 }
 return msg;
+`,
+  },
+
+  // ── Phase 3: animation primitives & easing ────────────────────────────────
+
+  {
+    name: "ae_animate_transform",
+    description: "Keyframe a transform property (position / scale / rotation / opacity) from one value to another between two times, with an easing preset. The general-purpose 'move this from A to B smoothly' tool. If `from` is omitted it defaults to a sensible rest value (position→comp centre, scale→100%, rotation→0°, opacity→0%) — pass it explicitly to start somewhere else.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      property: z.enum(["position", "scale", "rotation", "opacity"]),
+      to: z.union([z.number(), z.array(z.number())]).describe("Target value. Number for rotation/opacity (or to set all scale axes uniformly); [x,y] for position/scale."),
+      from: z.union([z.number(), z.array(z.number())]).optional().describe("Start value. Defaults to a rest value for the property."),
+      startTime: z.number().default(0),
+      endTime: z.number().default(1),
+      easing: z.enum(["linear", "easeIn", "easeOut", "easeInOut", "hold"]).default("easeInOut"),
+      influence: z.number().min(0.1).max(100).default(33).describe("Ease influence % (Easy Ease ≈ 33)."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var prop = OSR.tprop(L, A.property);
+function restValue() {
+  if (A.property === "position") return OSR.coerce(prop, [comp.width / 2, comp.height / 2]);
+  if (A.property === "scale") return OSR.fill(prop, 100);
+  if (A.property === "opacity") return 0;
+  return 0; // rotation
+}
+var from = (A.from === undefined || A.from === null) ? restValue() : OSR.coerce(prop, A.from);
+var to = OSR.coerce(prop, A.to);
+prop.setValueAtTime(A.startTime, from);
+prop.setValueAtTime(A.endTime, to);
+OSR.applyEase(prop, A.easing, A.influence);
+function fmt(v) { return (v instanceof Array) ? "[" + v.join(", ") + "]" : String(v); }
+return "Animated " + A.property + " of '" + L.name + "': " + fmt(from) + " -> " + fmt(to) + " over " + A.startTime + "s-" + A.endTime + "s (" + A.easing + ")";
+`,
+  },
+
+  {
+    name: "ae_set_easing",
+    description: "Re-ease the existing keyframes of a transform property with a preset (linear / easeIn / easeOut / easeInOut / hold). Use after manual keyframing, or to dial in the feel of an already-animated property.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      property: z.enum(["position", "scale", "rotation", "opacity"]),
+      easing: z.enum(["linear", "easeIn", "easeOut", "easeInOut", "hold"]).default("easeInOut"),
+      influence: z.number().min(0.1).max(100).default(33),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var prop = OSR.tprop(L, A.property);
+if (prop.numKeys < 1) throw new Error(A.property + " of '" + L.name + "' has no keyframes to ease.");
+OSR.applyEase(prop, A.easing, A.influence);
+return "Re-eased " + prop.numKeys + " keyframe(s) of " + A.property + " on '" + L.name + "' (" + A.easing + ")";
+`,
+  },
+
+  {
+    name: "ae_add_fade",
+    description: "Add an opacity fade-in and/or fade-out at the layer's in/out points, eased.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.string(),
+      fadeIn: z.boolean().default(true),
+      fadeOut: z.boolean().default(false),
+      durationSeconds: z.number().positive().default(0.4),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+if (!A.fadeIn && !A.fadeOut) throw new Error("Enable fadeIn and/or fadeOut.");
+var comp = OSR.comp(A.comp);
+var L = OSR.layer(comp, A.layer);
+var op = OSR.tprop(L, "opacity");
+var d = A.durationSeconds, inP = L.inPoint, outP = L.outPoint;
+if (A.fadeIn) { op.setValueAtTime(inP, 0); op.setValueAtTime(inP + d, 100); }
+if (A.fadeOut) { op.setValueAtTime(Math.max(inP, outP - d), 100); op.setValueAtTime(outP, 0); }
+OSR.applyEase(op, "easeInOut", 33);
+return "Fade on '" + L.name + "'" + (A.fadeIn ? " in" : "") + (A.fadeOut ? " out" : "") + " (" + d + "s)";
 `,
   },
 ];

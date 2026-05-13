@@ -45,9 +45,62 @@ var OSR = {
     for (var i = 0; i < base.length; i++) o.push(base[i] * factor);
     return o;
   },
+  // Number of value components for a property — derived from its type (always safe to read),
+  // because the .value getter itself can throw "invalid numeric result" on shape-layer
+  // spatial properties that have no keyframes (an Advanced-3D-renderer quirk).
+  dimsOf: function (prop) {
+    switch (prop.propertyValueType) {
+      case PropertyValueType.ThreeD: case PropertyValueType.ThreeD_SPATIAL: return 3;
+      case PropertyValueType.TwoD: case PropertyValueType.TwoD_SPATIAL: return 2;
+      default: return 1;
+    }
+  },
+  // A vector of the right length filled with n (or n itself for 1-D properties).
+  fill: function (prop, n) {
+    var d = OSR.dimsOf(prop);
+    if (d === 1) return n;
+    var a = []; for (var i = 0; i < d; i++) a.push(n); return a;
+  },
+  // Coerce a user-supplied number-or-array to match a property's dimensionality.
+  // Missing components are padded with the property's natural rest value (0, except Scale → 100).
+  // A bare number is broadcast to every component.
+  coerce: function (prop, val) {
+    var d = OSR.dimsOf(prop);
+    if (d === 1) return (val instanceof Array) ? val[0] : val;
+    var pad = (prop.matchName === "ADBE Scale") ? 100 : 0;
+    if (val instanceof Array) {
+      var a = []; for (var i = 0; i < d; i++) a.push(i < val.length ? val[i] : pad); return a;
+    }
+    var b = []; for (var j = 0; j < d; j++) b.push(val); return b;
+  },
   easeKeys: function (prop) {
-    for (var i = 1; i <= prop.numKeys; i++) {
-      try { prop.setInterpolationTypeAtKey(i, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER); } catch (e) {}
+    OSR.applyEase(prop, "easeInOut", 33);
+  },
+  // Apply an easing preset to every keyframe of a property.
+  //   linear | hold | easeIn (ease the incoming side) | easeOut (ease the outgoing side) | easeInOut (Easy Ease)
+  applyEase: function (prop, mode, influence) {
+    var n = prop.numKeys;
+    if (n < 1) return;
+    var inf = influence || 33;
+    function easeDims() {
+      // Spatial properties (Position, Anchor Point) take a single scalar temporal ease,
+      // even though their value is a 2D/3D array. Otherwise match the value dimensions.
+      var mn = prop.matchName;
+      if (mn === "ADBE Position" || mn === "ADBE Anchor Point") return 1;
+      return OSR.dimsOf(prop);
+    }
+    function eases(amount) {
+      var d = easeDims(), a = [];
+      for (var i = 0; i < d; i++) a.push(new KeyframeEase(0, amount));
+      return a;
+    }
+    for (var k = 1; k <= n; k++) {
+      if (mode === "linear") { try { prop.setInterpolationTypeAtKey(k, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR); } catch (e) {} continue; }
+      if (mode === "hold") { try { prop.setInterpolationTypeAtKey(k, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.HOLD); } catch (e) {} continue; }
+      try { prop.setInterpolationTypeAtKey(k, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER); } catch (e) {}
+      var inAmount = (mode === "easeOut") ? 0.1 : inf;
+      var outAmount = (mode === "easeIn") ? 0.1 : inf;
+      try { prop.setTemporalEaseAtKey(k, eases(inAmount), eases(outAmount)); } catch (e) {}
     }
   },
   findShapeSize: function (group) {
