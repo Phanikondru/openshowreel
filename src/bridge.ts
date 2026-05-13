@@ -67,6 +67,7 @@ function wrap(body: string, resultPath: string): string {
   var __rf = new File(${JSON.stringify(resultPath)});
   function __out(status, msg) {
     __rf.encoding = "UTF-8";
+    __rf.lineFeed = "Unix";
     __rf.open("w");
     __rf.write(status + "\\n" + (msg === undefined || msg === null ? "" : String(msg)));
     __rf.close();
@@ -119,11 +120,16 @@ export async function runJsx(body: string): Promise<string> {
   await writeFile(scriptPath, wrap(body, resultPath), "utf8");
 
   const appName = await resolveAppName();
+  // After Effects' DoScript only accepts a script *string*, not a file. Pass a tiny
+  // bootstrap that reads our (possibly large, multi-line) script file and evals it —
+  // avoids escaping the whole script into an AppleScript string literal.
+  const bootstrap = `var __sf=new File(${JSON.stringify(scriptPath)});__sf.encoding="UTF-8";__sf.open("r");var __code=__sf.read();__sf.close();eval(__code);`;
+  const asLiteral = `"${bootstrap.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   let execErr: unknown;
   try {
     await execFileP(
       "osascript",
-      ["-e", `tell application ${JSON.stringify(appName)}`, "-e", `DoScript (POSIX file ${JSON.stringify(scriptPath)})`, "-e", "end tell"],
+      ["-e", `tell application ${JSON.stringify(appName)} to DoScript ${asLiteral}`],
       { timeout: 180_000 },
     );
   } catch (e) {
@@ -147,9 +153,10 @@ export async function runJsx(body: string): Promise<string> {
     );
   }
 
-  const nl = raw.indexOf("\n");
-  const status = (nl === -1 ? raw : raw.slice(0, nl)).trim();
-  const message = (nl === -1 ? "" : raw.slice(nl + 1)).trim();
+  const normalized = raw.replace(/\r\n?/g, "\n");
+  const nl = normalized.indexOf("\n");
+  const status = (nl === -1 ? normalized : normalized.slice(0, nl)).trim();
+  const message = (nl === -1 ? "" : normalized.slice(nl + 1)).trim();
   if (status === "OK") return message || "done";
   throw new Error(message || "Unknown After Effects error");
 }

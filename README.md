@@ -105,7 +105,7 @@ npm start          # or: npm run dev   (runs from source via tsx)
 | `ae_add_master_camera` | One master Null over everything + slight tilt expression — the cinematic stitch |
 | `ae_eval` | Escape hatch: run arbitrary ExtendScript |
 
-A typical sequence: `ae_setup_comp` → `ae_create_shape` (button) → `ae_create_shape` (background frame) → `ae_morph_size` (frame stretches as the button moves) → `ae_add_button_press` → `ae_add_bounce_expression` on the button → `ae_create_null_path` to fly it in on a curve → child arrow gets `ae_add_timing_offset` → `ae_add_text_reveal` for the headline → finish with `ae_add_master_camera`.
+A typical sequence: `ae_setup_comp` → `ae_create_shape` (button) → `ae_create_shape` (background frame) → `ae_morph_size` (frame stretches as the button moves) → `ae_add_button_press` → `ae_add_bounce_expression` on the button → `ae_create_null_path` to fly it in on a curve → child arrow gets `ae_add_timing_offset` → `ae_add_text_reveal` for the headline → finish with `ae_add_master_camera`. See [`examples/demo-showreel.mjs`](examples/demo-showreel.mjs) for exactly that, runnable against a live After Effects.
 
 > **Note:** the ExtendScript match-names target current After Effects builds. If a tool errors on an older/newer version, `ae_eval` lets you patch around it, and PRs adjusting match-names are welcome.
 
