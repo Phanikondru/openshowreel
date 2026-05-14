@@ -1,0 +1,32 @@
+{
+  "name": "openshowreel",
+  "version": "0.1.0",
+  "description": "MCP server for Adobe After Effects — drive premium showreel motion programmatically",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "openshowreel": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && OPENSHOWREEL_DRY_RUN=1 node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
