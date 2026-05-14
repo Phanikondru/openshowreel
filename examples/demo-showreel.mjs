@@ -43,7 +43,7 @@ await call("ae_create_null_path", { layer: "Dot", points: [[200, 180], [700, 360
 
 await call("ae_create_text", { text: "OPEN SHOWREEL", fontSize: 120, color: [1, 1, 1], position: [960, 250] });
 await call("ae_add_fade", { layer: "OPEN SHOWREEL", fadeIn: true, durationSeconds: 0.4 });
-await call("ae_add_text_reveal", { text: "after effects, on autopilot", fontSize: 52, color: [0.55, 0.6, 0.7], position: [960, 800], staggerSeconds: 0.9, startTime: 0.8 });
+await call("ae_add_text_reveal", { text: "after effects, on autopilot", fontSize: 52, color: [0.55, 0.6, 0.7], position: [960, 800], perChunkSeconds: 0.3, startTime: 0.8 });
 
 await call("ae_add_master_camera", { tiltDegrees: 1.2 });
 

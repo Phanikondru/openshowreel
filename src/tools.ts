@@ -266,7 +266,7 @@ return A.property + " of '" + L.name + "' linked to ${tProp} of '" + A.targetLay
 
   {
     name: "ae_add_text_reveal",
-    description: "Create a premium staggered text reveal: a Text Animator pushes each glyph off-screen (Position offset) at 0% opacity, and an Expression Selector pulls them into place one character/word/line at a time — not a flat fade.",
+    description: "Word-by-word staggered text reveal — not a flat fade. A Text Animator pushes each unit off-screen (Position offset) at 0% opacity; an Expression Selector pulls one chunk into place at a time. Defaults to words; set chunkSize=2 to reveal two words at a time, or basedOn=characters for a typewriter feel.",
     schema: {
       comp: z.string().optional(),
       text: z.string(),
@@ -275,18 +275,25 @@ return A.property + " of '" + L.name + "' linked to ${tProp} of '" + A.targetLay
       fontSize: z.number().positive().default(120),
       color: Color.default([1, 1, 1]),
       font: z.string().optional().describe("PostScript font name, e.g. 'Inter-Bold'."),
-      basedOn: z.enum(["characters", "words", "lines"]).default("characters"),
-      offsetY: z.number().default(-120).describe("How far (px) each glyph starts above its final spot."),
+      basedOn: z.enum(["characters", "words", "lines"]).default("words").describe("Reveal unit. Default 'words' shows one word at a time. Use 'characters' for typewriter, 'lines' for whole lines."),
+      chunkSize: z.number().int().positive().default(1).describe("How many units (words/chars/lines) reveal together as one chunk. 2 = two words at a time."),
+      offsetY: z.number().default(-60).describe("How far (px) each unit starts above its final spot. Negative = drops down into place."),
+      offsetX: z.number().default(0).describe("How far (px) each unit starts to the side of its final spot."),
       startTime: z.number().default(0),
-      staggerSeconds: z.number().positive().default(0.9).describe("Total time across which the whole reveal staggers."),
+      perChunkSeconds: z.number().positive().default(0.35).describe("How long each chunk takes to reveal AND how long until the next chunk starts. Higher = slower, more visible reveal per word/chunk."),
     },
     build: (a) => {
-      // Selector amount 100 = "animator fully applied" = glyph off-screen at 0% opacity;
-      // amount 0 = glyph at rest (revealed). So each glyph eases 100 -> 0 over its slot.
+      const chunkSize = Math.max(1, Math.floor((a.chunkSize ?? 1) as number));
+      const perChunk = (a.perChunkSeconds ?? 0.35) as number;
+      const startTime = (a.startTime ?? 0) as number;
+      // Selector amount 100 = animator fully applied = unit off-screen at 0% opacity;
+      // amount 0 = unit at rest (revealed). Each chunk eases 100 -> 0 over `perChunk` seconds,
+      // and the chunk after it starts `perChunk` later, so reveals are visibly sequential.
       const expr =
-        `n = textTotal;\n` +
-        `seg = ${a.staggerSeconds ?? 0.9} / Math.max(n, 1);\n` +
-        `t = time - inPoint - ${a.startTime ?? 0} - (textIndex - 1) * seg;\n` +
+        `size = ${chunkSize};\n` +
+        `seg = ${perChunk};\n` +
+        `ci = Math.floor((textIndex - 1) / size);\n` +
+        `t = time - inPoint - ${startTime} - ci * seg;\n` +
         `clamp(ease(t, 0, seg, 100, 0), 0, 100)`;
       return `
 var A = ${lit(a)};
@@ -306,14 +313,17 @@ OSR.tprop(tl, "position").setValue(pos);
 var anim = tl.property("ADBE Text Properties").property("ADBE Text Animators").addProperty("ADBE Text Animator");
 anim.name = "Reveal";
 var props = anim.property("ADBE Text Animator Properties");
-props.addProperty("ADBE Text Position 3D").setValue([0, A.offsetY, 0]);
+props.addProperty("ADBE Text Position 3D").setValue([A.offsetX || 0, A.offsetY, 0]);
 props.addProperty("ADBE Text Opacity").setValue(0);
+// Remove the default Range Selector that AE attaches when an animator is created —
+// otherwise it selects all chars at 100% and combines with our Expression Selector
+// (default mode = Add, clamped to 100), making everything permanently invisible.
 var sels = anim.property("ADBE Text Selectors");
 while (sels.numProperties > 0) { try { sels.property(1).remove(); } catch (e) { break; } }
 var es = sels.addProperty("ADBE Text Expressible Selector");
-try { es.property("ADBE Text Range Type2").setValue(${basedOnInt(a.basedOn ?? "characters")}); } catch (e) {}
+try { es.property("ADBE Text Range Type2").setValue(${basedOnInt(a.basedOn ?? "words")}); } catch (e) {}
 es.property("ADBE Text Expressible Amount").expression = ${lit(expr)};
-return "Text reveal '" + tl.name + "' created — staggered per " + A.basedOn + " over " + A.staggerSeconds + "s from " + A.startTime + "s.";
+return "Text reveal '" + tl.name + "' created — " + A.basedOn + (A.chunkSize > 1 ? " (chunks of " + A.chunkSize + ")" : "") + ", " + ${perChunk} + "s per chunk, from " + ${startTime} + "s.";
 `;
     },
   },
