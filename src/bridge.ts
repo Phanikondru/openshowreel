@@ -110,6 +110,115 @@ var OSR = {
       if (p.numProperties && p.numProperties > 0) { var r = OSR.findShapeSize(p); if (r) return r; }
     }
     return null;
+  },
+  // ---- Phase 2 helpers ----
+  // Compact, opinionated layer summary. Returns a plain object with whatever fields you asked for
+  // (defaults to a short set). Avoids dumping the full property tree.
+  layerInfo: function (layer, fields) {
+    var f = fields || ["in", "out", "start", "name", "index"];
+    var has = {}; for (var i = 0; i < f.length; i++) has[f[i]] = true;
+    var o = {};
+    if (has["name"]) o.name = layer.name;
+    if (has["index"]) o.index = layer.index;
+    if (has["in"]) o["in"] = layer.inPoint;
+    if (has["out"]) o["out"] = layer.outPoint;
+    if (has["start"]) o.start = layer.startTime;
+    if (has["enabled"]) o.enabled = layer.enabled;
+    if (has["parent"]) o.parent = layer.parent ? layer.parent.name : null;
+    if (has["blendMode"]) o.blendMode = layer.blendingMode;
+    if (has["pos"] || has["position"]) o.pos = OSR.tprop(layer, "position").value;
+    if (has["scale"]) o.scale = OSR.tprop(layer, "scale").value;
+    if (has["opacity"]) o.opacity = OSR.tprop(layer, "opacity").value;
+    if (has["rotation"]) o.rotation = OSR.tprop(layer, "rotation").value;
+    if (has["anchor"]) o.anchor = OSR.tprop(layer, "anchor").value;
+    return o;
+  },
+  // Set in/out/start atomically without clipping. AE shifts in/out when startTime moves,
+  // so we park outPoint far first, then set startTime, then in/out. Returns prev values.
+  setTiming: function (layer, t) {
+    var prev = { "in": layer.inPoint, out: layer.outPoint, start: layer.startTime };
+    var comp = layer.containingComp;
+    var safe = (comp ? comp.duration : 1e6) + 1;
+    layer.outPoint = safe;
+    if (t.start !== undefined && t.start !== null) layer.startTime = t.start;
+    if (t["in"] !== undefined && t["in"] !== null) layer.inPoint = t["in"];
+    layer.outPoint = (t.out !== undefined && t.out !== null) ? t.out : prev.out;
+    return prev;
+  },
+  // Resolve a dotted property path like "Transform.Position" or "Effects.Drop Shadow.Opacity".
+  // Falls back to matchName lookup for common transform names.
+  prop: function (layer, path) {
+    if (!path) return layer;
+    var parts = (path instanceof Array) ? path : String(path).split(".");
+    var p = layer;
+    for (var i = 0; i < parts.length; i++) {
+      var name = parts[i];
+      var next = null;
+      try { next = p.property(name); } catch (e) { next = null; }
+      if (!next) throw new Error("Property not found at '" + parts.slice(0, i + 1).join(".") + "' (layer '" + (layer.name || "?") + "')");
+      p = next;
+    }
+    return p;
+  },
+  // Compact keyframe list for a property: [{t, v}]. Skips temporal-ease (use setKeys to set it).
+  keysOf: function (prop) {
+    var n = prop.numKeys, out = [];
+    for (var k = 1; k <= n; k++) out.push({ t: prop.keyTime(k), v: prop.keyValue(k) });
+    return out;
+  },
+  // Replace all keyframes on a property with the given list (atomic).
+  // Each key: {t, v, interp?: "linear"|"bezier"|"hold", ease?: "easeIn"|"easeOut"|"easeInOut"|"linear"|"hold"}
+  setKeys: function (prop, keys) {
+    while (prop.numKeys > 0) prop.removeKey(1);
+    if (!keys || keys.length === 0) return 0;
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      prop.setValueAtTime(k.t, k.v);
+    }
+    var defaultEase = null;
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var interp = k.interp || "bezier";
+      try {
+        if (interp === "linear") prop.setInterpolationTypeAtKey(i + 1, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR);
+        else if (interp === "hold") prop.setInterpolationTypeAtKey(i + 1, KeyframeInterpolationType.HOLD, KeyframeInterpolationType.HOLD);
+        else prop.setInterpolationTypeAtKey(i + 1, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER);
+      } catch (e) {}
+      if (k.ease) {
+        if (!defaultEase) defaultEase = k.ease;
+      }
+    }
+    if (defaultEase) OSR.applyEase(prop, defaultEase, 33);
+    return keys.length;
+  },
+  // Bulk shift layers by delta seconds. opts: {minIn, maxIn, excludeNames, excludeIndices,
+  // includeNames, extendFullSpan} — extendFullSpan extends outPoint of layers that span to old end.
+  shiftLayers: function (comp, opts, delta) {
+    var o = opts || {};
+    var origDur = comp.duration;
+    var shifted = [], extended = [], skipped = [];
+    var exNames = {}, inNames = null, exIdx = {};
+    if (o.excludeNames) for (var i = 0; i < o.excludeNames.length; i++) exNames[o.excludeNames[i]] = true;
+    if (o.includeNames) { inNames = {}; for (var i = 0; i < o.includeNames.length; i++) inNames[o.includeNames[i]] = true; }
+    if (o.excludeIndices) for (var i = 0; i < o.excludeIndices.length; i++) exIdx[o.excludeIndices[i]] = true;
+    var minIn = (o.minIn !== undefined) ? o.minIn : -Infinity;
+    var maxIn = (o.maxIn !== undefined) ? o.maxIn : Infinity;
+    for (var i = 1; i <= comp.numLayers; i++) {
+      var l = comp.layer(i);
+      var tag = i + " '" + l.name + "'";
+      if (exNames[l.name] || exIdx[i]) { skipped.push(tag + " excluded"); continue; }
+      if (inNames && !inNames[l.name]) { skipped.push(tag + " not in include list"); continue; }
+      if (l.inPoint >= minIn - 1e-6 && l.inPoint <= maxIn + 1e-6) {
+        var prev = OSR.setTiming(l, { start: l.startTime + delta, "in": l.inPoint + delta, out: l.outPoint + delta });
+        shifted.push(tag + " in " + prev["in"].toFixed(2) + "->" + l.inPoint.toFixed(2));
+      } else if (o.extendFullSpan && Math.abs(l.outPoint - origDur) < 0.1) {
+        l.outPoint = l.outPoint + delta;
+        extended.push(tag + " out=" + l.outPoint.toFixed(2));
+      } else {
+        skipped.push(tag + " in=" + l.inPoint.toFixed(2) + " out of range");
+      }
+    }
+    return { shifted: shifted, extended: extended, skipped: skipped };
   }
 };
 `;
@@ -164,7 +273,16 @@ async function resolveAppName(): Promise<string> {
 export type RunOptions = {
   /** Hard timeout for the AppleScript round-trip. Default 180 s. Bump it for renders. */
   timeoutMs?: number;
+  /** Cap the result string at this many bytes (default 6144). Set 0 to disable. */
+  maxResultBytes?: number;
 };
+
+const DEFAULT_MAX_RESULT_BYTES = 6144;
+
+function truncateResult(s: string, max: number): string {
+  if (!max || s.length <= max) return s;
+  return s.slice(0, max) + `\n…<${s.length - max} bytes truncated; ask for a narrower query>`;
+}
 
 /**
  * Run an ExtendScript body inside After Effects and return its result string.
@@ -208,6 +326,14 @@ export async function runJsx(body: string, opts: RunOptions = {}): Promise<strin
 
   if (raw === undefined) {
     const stderr = (execErr as { stderr?: string } | undefined)?.stderr?.trim();
+    const isTimeout = (execErr as { killed?: boolean; signal?: string } | undefined)?.killed === true;
+    if (isTimeout) {
+      throw new Error(
+        `After Effects did not finish within ${opts.timeoutMs ?? 180_000} ms. ` +
+          `Partial state may be committed — run a small ae_eval to inspect what changed before retrying. ` +
+          `Split long-running scripts into smaller batches; never call app.executeCommand(16) (undo) to "recover" — it undoes prior wrapped operations too.`,
+      );
+    }
     throw new Error(
       stderr ||
         `After Effects did not respond. Is "${appName}" installed and able to run scripts? ` +
@@ -219,6 +345,7 @@ export async function runJsx(body: string, opts: RunOptions = {}): Promise<strin
   const nl = normalized.indexOf("\n");
   const status = (nl === -1 ? normalized : normalized.slice(0, nl)).trim();
   const message = (nl === -1 ? "" : normalized.slice(nl + 1)).trim();
-  if (status === "OK") return message || "done";
-  throw new Error(message || "Unknown After Effects error");
+  const cap = opts.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES;
+  if (status === "OK") return truncateResult(message || "done", cap);
+  throw new Error(truncateResult(message || "Unknown After Effects error", cap));
 }

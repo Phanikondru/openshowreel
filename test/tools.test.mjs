@@ -52,6 +52,13 @@ const sampleArgs = {
   ae_animate_time_remap: { layer: "Clip", keys: [{ at: 0, source: 0 }, { at: 2, source: 1 }] },
   ae_add_device_frame: { layer: "Box", style: "browser" },
   ae_render_frames: { times: [0.5, 1.0] },
+  // Phase 3 focused tools
+  ae_get_layer: { layer: 1 },
+  ae_set_layer_timing: { layer: 1, in: 0, out: 2 },
+  ae_get_keyframes: { layer: "Box", property: "Transform.Position" },
+  ae_set_keyframes: { layer: "Box", property: "Transform.Position", keys: [{ t: 0, v: [100, 100] }, { t: 1, v: [400, 100] }] },
+  ae_shift_layers: { delta: 1.5, minIn: 2, extendFullSpan: true },
+  ae_add_text_animator: { sourceComp: "Text 04", basedOn: "words", position: [300, 0, 0], opacity: 0, startKeys: [{ t: 0, v: 0 }, { t: 0.5, v: 100 }] },
 };
 
 test("every tool has a sample-args entry", () => {

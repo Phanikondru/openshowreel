@@ -31,9 +31,14 @@ const basedOnInt = (b: string): number => ({ characters: 1, words: 3, lines: 4 }
 export const tools: ShowreelTool[] = [
   {
     name: "ae_scene_info",
-    description: "Inspect the After Effects project: lists every composition with its size, frame rate, duration, motion-blur state, and layers (with parents). Use this first to see what exists.",
-    schema: {},
-    build: () => `
+    description: "Inspect the After Effects project: lists compositions with size, frame rate, duration, and layers. Use 'comp' to scope to one composition (cheap), or 'compsOnly: true' to skip layer enumeration (compact overview). With no args, dumps everything — this can be large on big projects.",
+    schema: {
+      comp: z.string().optional().describe("Only show this one composition (by name)."),
+      compsOnly: z.boolean().default(false).describe("Skip layer listing — return one line per comp."),
+      includeTiming: z.boolean().default(false).describe("Include each layer's in/out/start times."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
 var p = app.project;
 var out = "Project: " + (p.file ? p.file.name : "(unsaved)") + "\\n";
 var ac = p.activeItem;
@@ -41,10 +46,14 @@ out += "Active comp: " + (ac && ac instanceof CompItem ? ac.name : "(none)") + "
 for (var i = 1; i <= p.numItems; i++) {
   var it = p.item(i);
   if (!(it instanceof CompItem)) continue;
+  if (A.comp && it.name !== A.comp) continue;
   out += "\\nComp '" + it.name + "'  " + it.width + "x" + it.height + " @ " + it.frameRate + "fps  dur=" + it.duration.toFixed(2) + "s  motionBlur=" + it.motionBlur + "\\n";
+  if (A.compsOnly) continue;
   for (var l = 1; l <= it.numLayers; l++) {
     var L = it.layer(l);
-    out += "  [" + l + "] " + L.name + (L.parent ? "  (parent: " + L.parent.name + ")" : "") + "\\n";
+    var line = "  [" + l + "] " + L.name + (L.parent ? "  (parent: " + L.parent.name + ")" : "");
+    if (A.includeTiming) line += "  in=" + L.inPoint.toFixed(2) + " out=" + L.outPoint.toFixed(2) + " start=" + L.startTime.toFixed(2);
+    out += line + "\\n";
   }
 }
 return out;
@@ -53,9 +62,188 @@ return out;
 
   {
     name: "ae_eval",
-    description: "Escape hatch: run arbitrary ExtendScript inside After Effects. The code may `return` a value. Helpers under `OSR` are available (OSR.comp, OSR.layer, OSR.tprop, ...). Prefer the specific tools when one fits.",
-    schema: { code: z.string().describe("ExtendScript / After Effects scripting code to execute") },
-    build: (a) => a.code,
+    description: "Escape hatch: run arbitrary ExtendScript inside After Effects. The code may `return` a value. Helpers under `OSR` are available (OSR.comp, OSR.layer, OSR.tprop, ...). Prefer the specific tools when one fits. Set rehearsal:true to run inside an undo group that's auto-undone — useful to test a script's output without committing changes.",
+    schema: {
+      code: z.string().describe("ExtendScript / After Effects scripting code to execute"),
+      rehearsal: z.boolean().default(false).describe("If true, all changes are undone after the script runs (return value is preserved). Use to safely test edits."),
+    },
+    build: (a) => {
+      if (!a.rehearsal) return a.code;
+      // Wrap in its own undo group, capture the return, then undo.
+      // Note the outer OpenShowreel undo wrapper still surrounds this — but app.executeCommand(16)
+      // here will undo the innermost group, so changes are reverted before returning.
+      return `
+app.beginUndoGroup("ae_eval rehearsal");
+var __rehearsalResult;
+var __rehearsalErr;
+try { __rehearsalResult = (function () { ${a.code} })(); }
+catch (e) { __rehearsalErr = e; }
+app.endUndoGroup();
+app.executeCommand(16);
+if (__rehearsalErr) throw __rehearsalErr;
+return "[rehearsal] " + (__rehearsalResult === undefined ? "done (changes undone)" : __rehearsalResult);
+`;
+    },
+  },
+
+  // -------- Phase 3: focused inspection / editing tools --------
+  // These wrap common operations that were previously hand-rolled in ae_eval calls,
+  // returning compact JSON-shaped output so the caller doesn't burn tokens introspecting.
+
+  {
+    name: "ae_get_layer",
+    description: "Compact layer state — only the fields you ask for, returned as JSON. Avoids dumping the full property tree. Default fields: in, out, start, name, index.",
+    schema: {
+      comp: z.string().optional().describe("Composition name. Defaults to the active comp."),
+      layer: z.union([z.string(), z.number().int().positive()]).describe("Layer name or 1-based index."),
+      fields: z.array(z.enum(["in", "out", "start", "name", "index", "enabled", "parent", "blendMode", "pos", "position", "scale", "opacity", "rotation", "anchor"])).optional()
+        .describe("Which fields to include. Default: in,out,start,name,index."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var layer = OSR.layer(comp, A.layer);
+return JSON.stringify(OSR.layerInfo(layer, A.fields));
+`,
+  },
+
+  {
+    name: "ae_set_layer_timing",
+    description: "Atomically set a layer's startTime / inPoint / outPoint without clipping (handles the 'park outPoint first' dance). Returns the previous timing.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.union([z.string(), z.number().int().positive()]),
+      in: z.number().optional().describe("New inPoint in seconds."),
+      out: z.number().optional().describe("New outPoint in seconds."),
+      start: z.number().optional().describe("New startTime in seconds. AE shifts in/out with startTime; this tool re-applies in/out after so they stick."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var layer = OSR.layer(comp, A.layer);
+var prev = OSR.setTiming(layer, { start: A.start, "in": A["in"], out: A.out });
+return JSON.stringify({ prev: prev, now: { "in": layer.inPoint, out: layer.outPoint, start: layer.startTime } });
+`,
+  },
+
+  {
+    name: "ae_get_keyframes",
+    description: "List all keyframes on a property as [{t, v}]. Property path is dotted: 'Transform.Position', 'Effects.Drop Shadow.Opacity', etc.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.union([z.string(), z.number().int().positive()]),
+      property: z.string().describe("Dotted property path, e.g. 'Transform.Position' or 'Effects.Drop Shadow.Opacity'."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var layer = OSR.layer(comp, A.layer);
+var prop = OSR.prop(layer, A.property);
+return JSON.stringify(OSR.keysOf(prop));
+`,
+  },
+
+  {
+    name: "ae_set_keyframes",
+    description: "Replace all keyframes on a property with the given list. Each key: {t, v, interp?: 'linear'|'bezier'|'hold'}. If any key has 'ease', that easing is applied across the whole property.",
+    schema: {
+      comp: z.string().optional(),
+      layer: z.union([z.string(), z.number().int().positive()]),
+      property: z.string().describe("Dotted property path, e.g. 'Transform.Position'."),
+      keys: z.array(z.object({
+        t: z.number().describe("Time in seconds (comp time)."),
+        v: z.union([z.number(), z.array(z.number())]).describe("Value: scalar for 1D, array for 2D/3D."),
+        interp: z.enum(["linear", "bezier", "hold"]).optional(),
+        ease: z.enum(["linear", "hold", "easeIn", "easeOut", "easeInOut"]).optional(),
+      })),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var layer = OSR.layer(comp, A.layer);
+var prop = OSR.prop(layer, A.property);
+var n = OSR.setKeys(prop, A.keys);
+return "Set " + n + " keyframe(s) on " + A.property;
+`,
+  },
+
+  {
+    name: "ae_shift_layers",
+    description: "Bulk shift layers' timing by delta seconds. Filter by inPoint range, include/exclude names, or extend full-span (background) layers. Returns shifted / extended / skipped lists.",
+    schema: {
+      comp: z.string().optional(),
+      delta: z.number().describe("Seconds to shift (negative shifts earlier)."),
+      minIn: z.number().optional().describe("Only shift layers whose inPoint >= this."),
+      maxIn: z.number().optional().describe("Only shift layers whose inPoint <= this."),
+      excludeNames: z.array(z.string()).optional().describe("Layer names to skip (e.g. ['Text 01','Text 02'])."),
+      includeNames: z.array(z.string()).optional().describe("If set, only shift layers with these names."),
+      excludeIndices: z.array(z.number().int().positive()).optional(),
+      extendFullSpan: z.boolean().default(true).describe("Extend outPoint of layers that span to the comp's current duration (backgrounds)."),
+    },
+    build: (a) => `
+var A = ${lit(a)};
+var comp = OSR.comp(A.comp);
+var r = OSR.shiftLayers(comp, {
+  minIn: A.minIn, maxIn: A.maxIn,
+  excludeNames: A.excludeNames, includeNames: A.includeNames, excludeIndices: A.excludeIndices,
+  extendFullSpan: A.extendFullSpan
+}, A.delta);
+return "Shifted " + r.shifted.length + " | Extended " + r.extended.length + " | Skipped " + r.skipped.length +
+  (r.shifted.length ? "\\n--- shifted ---\\n" + r.shifted.join("\\n") : "") +
+  (r.extended.length ? "\\n--- extended ---\\n" + r.extended.join("\\n") : "");
+`,
+  },
+
+  {
+    name: "ae_add_text_animator",
+    description: "Add a Text Animator (Range Selector + Properties) to a text layer's source. Useful for word/character reveals, slide-ins, fade-outs. The target layer must be inside a precomp; pass the precomp name in 'sourceComp'.",
+    schema: {
+      sourceComp: z.string().describe("Name of the precomp that contains the text layer (the source comp, not the parent comp)."),
+      layerIndex: z.number().int().positive().default(1).describe("Index of the text layer inside the source comp (default 1)."),
+      name: z.string().default("Animator").describe("Animator name."),
+      basedOn: z.enum(["characters", "charactersExcludingSpaces", "words", "lines"]).default("words"),
+      shape: z.enum(["square", "rampUp", "rampDown", "triangle", "round", "smooth"]).default("rampUp"),
+      easeHigh: z.number().min(-100).max(100).default(33),
+      easeLow: z.number().min(-100).max(100).default(33),
+      position: z.array(z.number()).optional().describe("Position offset [x,y,z]. Applies to selected text."),
+      opacity: z.number().min(0).max(100).optional().describe("Opacity for selected text."),
+      scale: z.array(z.number()).optional().describe("Scale [x,y,z] as percentages."),
+      // The selector can either be static (start/end constants) or animated via keyframes.
+      startKeys: z.array(z.object({ t: z.number(), v: z.number().min(0).max(100) })).optional()
+        .describe("Keyframes on the selector's Start (0-100). Use this to reveal words over time."),
+      endKeys: z.array(z.object({ t: z.number(), v: z.number().min(0).max(100) })).optional()
+        .describe("Keyframes on the selector's End (0-100)."),
+      // Or you can keyframe the property values themselves (useful for 'all out' style exits).
+      positionKeys: z.array(z.object({ t: z.number(), v: z.array(z.number()) })).optional(),
+      opacityKeys: z.array(z.object({ t: z.number(), v: z.number().min(0).max(100) })).optional(),
+    },
+    build: (a) => {
+      const shapeInt = ({ square: 1, rampUp: 2, rampDown: 3, triangle: 4, round: 5, smooth: 6 } as Record<string, number>)[a.shape] ?? 2;
+      const basedOnIntV = ({ characters: 1, charactersExcludingSpaces: 2, words: 3, lines: 4 } as Record<string, number>)[a.basedOn] ?? 3;
+      return `
+var A = ${lit(a)};
+var src = OSR.comp(A.sourceComp);
+var tl = src.layer(A.layerIndex);
+var anims = tl.property("Text").property("Animators");
+var anim = anims.addProperty("ADBE Text Animator");
+anim.name = A.name;
+var props = anim.property("Properties");
+var p_pos = null, p_op = null, p_sc = null;
+if (A.position) { p_pos = props.addProperty("ADBE Text Position 3D"); p_pos.setValue(A.position); }
+if (A.opacity !== undefined && A.opacity !== null) { p_op = props.addProperty("ADBE Text Opacity"); p_op.setValue(A.opacity); }
+if (A.scale) { p_sc = props.addProperty("ADBE Text Scale 3D"); p_sc.setValue(A.scale); }
+var sel = anim.property("Selectors").addProperty("ADBE Text Selector");
+sel.property("Advanced").property("Based On").setValue(${basedOnIntV});
+sel.property("Advanced").property("Shape").setValue(${shapeInt});
+sel.property("Advanced").property("Ease High").setValue(A.easeHigh);
+sel.property("Advanced").property("Ease Low").setValue(A.easeLow);
+if (A.startKeys) { var sp = sel.property("Start"); for (var i = 0; i < A.startKeys.length; i++) sp.setValueAtTime(A.startKeys[i].t, A.startKeys[i].v); }
+if (A.endKeys)   { var ep = sel.property("End");   for (var i = 0; i < A.endKeys.length; i++)   ep.setValueAtTime(A.endKeys[i].t,   A.endKeys[i].v); }
+if (A.positionKeys && p_pos) { for (var i = 0; i < A.positionKeys.length; i++) p_pos.setValueAtTime(A.positionKeys[i].t, A.positionKeys[i].v); }
+if (A.opacityKeys && p_op)   { for (var i = 0; i < A.opacityKeys.length; i++)   p_op.setValueAtTime(A.opacityKeys[i].t, A.opacityKeys[i].v); }
+return "Added animator '" + anim.name + "' to '" + A.sourceComp + "' layer " + A.layerIndex;
+`;
+    },
   },
 
   {
